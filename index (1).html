@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PDF Library</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#fafafa; color:#1a1a1a; }
+  #layout { max-width:1100px; margin:0 auto; padding:24px; display:flex; gap:28px; align-items:flex-start; }
+  #sidebar { width:200px; flex-shrink:0; position:sticky; top:24px; }
+  #sidebar h4 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:#999; }
+  .subject-pill { display:flex; justify-content:space-between; padding:7px 10px; border-radius:6px; cursor:pointer; font-size:14px; margin-bottom:2px; }
+  .subject-pill:hover { background:#f0f0f0; }
+  .subject-pill.active { background:#111; color:#fff; }
+  .subject-pill .count { color:#999; font-size:12px; }
+  .subject-pill.active .count { color:#ccc; }
+  #main { flex:1; min-width:0; }
+  h1 { margin-bottom:4px; }
+  .sub { color:#666; margin-top:0; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin:16px 0; align-items:center; }
+  input[type=text], input[type=search], select { flex:1; min-width:150px; padding:8px; border:1px solid #ccc; border-radius:6px; font-family:inherit; font-size:14px; }
+  input[type=file] { flex:1; min-width:150px; }
+  button { padding:8px 16px; border-radius:6px; border:1px solid #111; background:#111; color:#fff; cursor:pointer; }
+  .small-btn { padding:5px 10px; font-size:12px; border-radius:5px; border:1px solid #ccc; background:#fff; color:#111; }
+  #status { font-size:13px; color:#888; margin-bottom:16px; }
+  #search { width:100%; margin-bottom:20px; }
+  .subject-block { margin-bottom:24px; }
+  .subject-block h3 { border-bottom:1px solid #eee; padding-bottom:6px; margin-bottom:8px; }
+  .doc-card { border:1px solid #eee; border-radius:8px; padding:12px; margin-bottom:8px; }
+  .doc-top { display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px; }
+  .doc-date { font-size:12px; color:#999; }
+  .btn-row { margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; }
+  pre.extract { white-space:pre-wrap; background:#fafafa; padding:8px; border-radius:6px; font-size:12px; max-height:200px; overflow:auto; margin-top:8px; display:none; }
+  a { text-decoration:none; }
+  #newSubjectInput { display:none; }
+  @media (max-width:700px){ #layout{flex-direction:column;} #sidebar{width:100%; position:static;} }
+</style>
+</head>
+<body>
+<div id="layout">
+  <div id="sidebar">
+    <h4>Subjects</h4>
+    <div id="subjectList"></div>
+  </div>
+
+  <div id="main">
+    <h1>PDF library</h1>
+    <p class="sub">Store PDFs by subject. Extract and search text instantly.</p>
+
+    <div class="row">
+      <select id="subjectSelect">
+        <option value="">Uncategorized</option>
+        <option value="__new__">+ New subject...</option>
+      </select>
+      <input type="text" id="newSubjectInput" placeholder="New subject name">
+      <input type="text" id="titleInput" placeholder="Title (optional)">
+      <input type="file" id="fileInput" accept="application/pdf">
+      <button id="uploadBtn">Upload</button>
+    </div>
+    <div id="status"></div>
+
+    <input type="search" id="search" placeholder="Search titles or extracted text...">
+
+    <div id="subjects"></div>
+  </div>
+</div>
+
+<!-- Supabase client (works directly in the browser, no build step) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!-- pdf.js for client-side text extraction -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+<script>
+// ====== CONFIGURE THESE TWO VALUES ======
+const SUPABASE_URL = "https://YOUR-PROJECT-ID.supabase.co";
+const SUPABASE_ANON_KEY = "YOUR-ANON-PUBLIC-KEY";
+// =========================================
+
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+const statusEl = document.getElementById('status');
+const setStatus = (msg) => statusEl.textContent = msg;
+
+let allDocs = [];
+let activeSubject = null; // null = show all
+
+async function extractText(file) {
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let text = '';
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    text += content.items.map(it => it.str).join(' ') + '\n';
+  }
+  return text.trim();
+}
+
+function fileUrl(filePath) {
+  const { data } = supabase.storage.from('pdfs').getPublicUrl(filePath);
+  return data.publicUrl;
+}
+
+async function loadDocs() {
+  const { data, error } = await supabase
+    .from('documents')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (!error) allDocs = data || [];
+  populateSubjectDropdown();
+  render();
+}
+
+function populateSubjectDropdown() {
+  const select = document.getElementById('subjectSelect');
+  const current = select.value;
+  const subjects = Array.from(new Set(allDocs.map(d => d.subject || 'Uncategorized'))).sort();
+
+  select.innerHTML = '<option value="">Uncategorized</option>';
+  subjects.filter(s => s !== 'Uncategorized').forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s;
+    opt.textContent = s;
+    select.appendChild(opt);
+  });
+  const newOpt = document.createElement('option');
+  newOpt.value = '__new__';
+  newOpt.textContent = '+ New subject...';
+  select.appendChild(newOpt);
+
+  if ([...select.options].some(o => o.value === current)) select.value = current;
+}
+
+document.getElementById('subjectSelect').addEventListener('change', (e) => {
+  const newInput = document.getElementById('newSubjectInput');
+  if (e.target.value === '__new__') {
+    newInput.style.display = 'block';
+    newInput.focus();
+  } else {
+    newInput.style.display = 'none';
+  }
+});
+
+async function handleUpload() {
+  const fileEl = document.getElementById('fileInput');
+  const file = fileEl.files[0];
+  if (!file) { setStatus('Choose a PDF file first.'); return; }
+
+  const select = document.getElementById('subjectSelect');
+  let subject;
+  if (select.value === '__new__') {
+    subject = document.getElementById('newSubjectInput').value.trim() || 'Uncategorized';
+  } else {
+    subject = select.value || 'Uncategorized';
+  }
+
+  const title = document.getElementById('titleInput').value.trim() || file.name.replace(/\.pdf$/i, '');
+
+  try {
+    setStatus('Extracting text...');
+    const extractedText = await extractText(file);
+
+    setStatus('Uploading file...');
+    const filePath = Date.now() + '_' + file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const { error: uploadError } = await supabase.storage.from('pdfs').upload(filePath, file, { contentType: 'application/pdf' });
+    if (uploadError) throw uploadError;
+
+    setStatus('Saving record...');
+    const { error: insertError } = await supabase.from('documents').insert({
+      subject, title, file_path: filePath, extracted_text: extractedText
+    });
+    if (insertError) throw insertError;
+
+    setStatus('Saved "' + title + '" under ' + subject + '.');
+    document.getElementById('titleInput').value = '';
+    document.getElementById('newSubjectInput').value = '';
+    document.getElementById('newSubjectInput').style.display = 'none';
+    fileEl.value = '';
+    loadDocs();
+  } catch (e) {
+    console.error(e);
+    setStatus('Error: ' + e.message);
+  }
+}
+
+async function handleDelete(doc) {
+  if (!confirm('Delete "' + doc.title + '"?')) return;
+  await supabase.storage.from('pdfs').remove([doc.file_path]);
+  await supabase.from('documents').delete().eq('id', doc.id);
+  loadDocs();
+}
+
+function renderSidebar(groups) {
+  const list = document.getElementById('subjectList');
+  list.innerHTML = '';
+
+  const allPill = document.createElement('div');
+  allPill.className = 'subject-pill' + (activeSubject === null ? ' active' : '');
+  allPill.innerHTML = '<span>All</span><span class="count">' + allDocs.length + '</span>';
+  allPill.onclick = () => { activeSubject = null; render(); };
+  list.appendChild(allPill);
+
+  Object.keys(groups).sort().forEach(subject => {
+    const pill = document.createElement('div');
+    pill.className = 'subject-pill' + (activeSubject === subject ? ' active' : '');
+    pill.innerHTML = '<span>' + subject + '</span><span class="count">' + groups[subject].length + '</span>';
+    pill.onclick = () => { activeSubject = subject; render(); };
+    list.appendChild(pill);
+  });
+}
+
+function render() {
+  const q = document.getElementById('search').value.trim().toLowerCase();
+  let docs = allDocs;
+  if (q) {
+    docs = docs.filter(d =>
+      (d.title || '').toLowerCase().includes(q) ||
+      (d.subject || '').toLowerCase().includes(q) ||
+      (d.extracted_text || '').toLowerCase().includes(q)
+    );
+  }
+
+  const allGroups = {};
+  for (const d of allDocs) {
+    const s = d.subject || 'Uncategorized';
+    (allGroups[s] = allGroups[s] || []).push(d);
+  }
+  renderSidebar(allGroups);
+
+  if (activeSubject !== null) {
+    docs = docs.filter(d => (d.subject || 'Uncategorized') === activeSubject);
+  }
+
+  const groups = {};
+  for (const d of docs) {
+    const s = d.subject || 'Uncategorized';
+    (groups[s] = groups[s] || []).push(d);
+  }
+
+  const container = document.getElementById('subjects');
+  container.innerHTML = '';
+
+  if (Object.keys(groups).length === 0) {
+    container.innerHTML = '<p style="color:#999;">No PDFs found.</p>';
+    return;
+  }
+
+  Object.keys(groups).sort().forEach(subject => {
+    const block = document.createElement('div');
+    block.className = 'subject-block';
+    block.innerHTML = '<h3>' + subject + ' (' + groups[subject].length + ')</h3>';
+
+    groups[subject].forEach(doc => {
+      const card = document.createElement('div');
+      card.className = 'doc-card';
+      card.innerHTML = `
+        <div class="doc-top">
+          <strong>${doc.title}</strong>
+          <span class="doc-date">${new Date(doc.created_at).toLocaleDateString()}</span>
+        </div>
+        <div class="btn-row">
+          <a href="${fileUrl(doc.file_path)}" target="_blank"><button class="small-btn">View</button></a>
+          <a href="${fileUrl(doc.file_path)}" download="${doc.title}.pdf"><button class="small-btn">Download</button></a>
+          <button class="small-btn" data-action="extract">Extract text</button>
+          <button class="small-btn" data-action="delete">Delete</button>
+        </div>
+        <pre class="extract">${(doc.extracted_text || '(no text extracted)').replace(/</g,'&lt;')}</pre>
+      `;
+      card.querySelector('[data-action="extract"]').onclick = () => {
+        const pre = card.querySelector('.extract');
+        pre.style.display = pre.style.display === 'none' || !pre.style.display ? 'block' : 'none';
+      };
+      card.querySelector('[data-action="delete"]').onclick = () => handleDelete(doc);
+      block.appendChild(card);
+    });
+
+    container.appendChild(block);
+  });
+}
+
+document.getElementById('uploadBtn').addEventListener('click', handleUpload);
+document.getElementById('search').addEventListener('input', render);
+
+loadDocs();
+</script>
+</body>
+</html>
